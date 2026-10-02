@@ -58,23 +58,24 @@ def quaternion_slerp(q1: torch.Tensor, q2: torch.Tensor, t: Union[float, torch.t
     # Compute the cosine of the angle between the two quaternions
     cos_theta = torch.sum(q1 * q2, dim=-1)
 
-    # reverse the direction of q2 if q1 and q2 are not in the same hemisphere
-    to_invert = cos_theta < 0
-    q2[to_invert] = -q2[to_invert]
-    cos_theta[to_invert] = -cos_theta[to_invert]
+    # Pick the shortest arc without modifying either input.
+    q2 = torch.where((cos_theta < 0)[..., None], -q2, q2)
+    cos_theta = cos_theta.abs().clamp(max=1.0)
+    close = cos_theta > 1.0 - 1e-6
+    t = torch.as_tensor(t, dtype=q1.dtype, device=q1.device)
 
-    # If the quaternions are close, perform a linear interpolation
-    if torch.all(cos_theta > 1.0 - 1e-6):
-        return q1 + t * (q2 - q1)
-
-    # Ensure the angle is between 0 and pi
-    theta = torch.acos(cos_theta)
+    # Keep the unused spherical branch away from its singularity, so close
+    # rows remain differentiable even when mixed with ordinary rotations.
+    theta = torch.acos(torch.where(close, torch.zeros_like(cos_theta), cos_theta))
     sin_theta = torch.sin(theta)
 
     # Perform the interpolation
     w1 = torch.sin((1.0 - t) * theta) / sin_theta
     w2 = torch.sin(t * theta) / sin_theta
-    return w1[:, None] * q1 + w2[:, None] * q2
+    spherical = w1[..., None] * q1 + w2[..., None] * q2
+    linear = q1 + t[..., None] * (q2 - q1)
+    linear = linear / linear.norm(dim=-1, keepdim=True)
+    return torch.where(close[..., None], linear, spherical)
 
 
 def acos_linear_extrapolation(
